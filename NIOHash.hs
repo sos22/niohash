@@ -61,7 +61,7 @@ insertHash base key value =
 lookupHash :: Forcable a => NIOHash a b -> a -> Maybe b
 lookupHash base key =
     let eq = nh_eq base
-    in foldl (\acc op ->
+    in foldr (\op acc ->
                   case op of
                     OpDelete k -> if k `eq` key
                                   then Nothing
