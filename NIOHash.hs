@@ -4,9 +4,11 @@
 module NIOHash(NIOHash, emptyHash, insertHash, lookupHash,
                deleteHash, Forcable) where
 
+import qualified Data.HashTable as HT
 import System.IO.Unsafe
 import Data.IORef
 import Control.Monad
+import Data.Int
 
 class Forcable a where
     force :: a -> b -> b
@@ -28,11 +30,11 @@ data Operation key value = OpDelete key
    to tell that you've done so. -}
 
 {- nh_nr_updates is always the length of nh_updates -}
-data Forcable key => NIOHash key value =
+data (Eq key, Forcable key) => NIOHash key value =
     NIOHash { nh_updates :: IORef [Operation key value],
               nh_nr_updates :: IORef Int,
-              nh_hash :: key -> Int,
-              nh_eq :: key -> key -> Bool
+              nh_table :: IORef (HT.HashTable key value),
+              nh_hash :: key -> Int32
             }
 
 {- Equations governing the hash table:
@@ -53,19 +55,21 @@ data Forcable key => NIOHash key value =
       such that k `eq` k2 == False.
 -}
 
-emptyHash :: Forcable a => (a -> Int) -> (a -> a -> Bool) ->  NIOHash a b
+emptyHash :: (Eq a, Forcable a) => (a -> Int32) -> NIOHash a b
 {-# NOINLINE emptyHash #-}
-emptyHash hash eq =
+emptyHash hash =
     unsafePerformIO $ do u <- newIORef []
                          nu <- newIORef 0
+                         h <- HT.new (==) hash
+                         h' <- newIORef h
                          return $ NIOHash { nh_updates = u,
                                             nh_nr_updates = nu,
-                                            nh_hash = hash,
-                                            nh_eq = eq }
+                                            nh_table = h',
+                                            nh_hash = hash }
 
 {- Can't just rewrite the updates IORef in the old hash table, because
    this is a semantic change.  Create a new one instead. -}
-deleteHash :: Forcable a => NIOHash a b -> a -> NIOHash a b
+deleteHash :: (Eq a, Forcable a) => NIOHash a b -> a -> NIOHash a b
 deleteHash base key =
     force key $ unsafePerformIO $
           do oldUpdates <- readIORef $ nh_updates base
@@ -74,7 +78,7 @@ deleteHash base key =
              newNrUpdates <- newIORef $ oldNrUpdates + 1
              return $ base { nh_updates = newUpdates,
                              nh_nr_updates = newNrUpdates }
-insertHash :: Forcable a => NIOHash a b -> a -> b -> NIOHash a b
+insertHash :: (Eq a, Forcable a) => NIOHash a b -> a -> b -> NIOHash a b
 insertHash base key value =
     force key $ unsafePerformIO $
           do oldUpdates <- readIORef $ nh_updates base
@@ -84,32 +88,53 @@ insertHash base key value =
              return $ base { nh_updates = newUpdates,
                              nh_nr_updates = newNrUpdates }
 
+flushUpdateQueue :: (Eq a, Forcable a) => NIOHash a b -> IO ()
+flushUpdateQueue base =
+    let applyUpdate ht (OpDelete k) = HT.delete ht k
+        applyUpdate ht (OpInsert k v) = HT.insert ht k v
+    in
+    do old_table <- readIORef $ nh_table base
+       old_table_list <- HT.toList old_table
+       new_table <- HT.fromList (nh_hash base) old_table_list
+       writeIORef (nh_nr_updates base) 0
+       writeIORef (nh_table base) new_table
+       updates <- readIORef $ nh_updates base
+       mapM_ (applyUpdate new_table) $ reverse updates
+
 {- We're allowed to put a new operation at the start of the list by
    rewriting the ioref, because this isn't a semantically visible
    change. -}
-lookupHash :: Forcable a => NIOHash a b -> a -> Maybe b
+lookupHash :: (Eq a, Forcable a) => NIOHash a b -> a -> Maybe b
 lookupHash base key =
-    force key $
+    force key $ {- force the key early, so that we don't need to evaluate
+                   externally-provided thunks in the unsafePerformIO block,
+                   which can lead to unexpected recursion. -}
     unsafePerformIO $ 
-    let eq = nh_eq base
-    in do oldUpdates <- readIORef $ nh_updates base
-          nrUpdates <- readIORef $ nh_nr_updates base
-          let (res, c, upd) =
-                  foldr (\(op,c) acc ->
-                             case op of
-                               OpDelete k -> if k `eq` key
-                                             then (Nothing, c, op)
-                                             else acc
-                               OpInsert k v -> if k `eq` key
-                                               then (Just v, c, op)
-                                               else acc)
-                            (Nothing, nrUpdates, OpDelete key) $
-                            zip oldUpdates [1..]
-              newUpdates = upd:oldUpdates
-
-          {- If we had to search a long way then prepend something to
-             the list so that we don't have to do it again. -}
-          when (c > 20) $ do writeIORef (nh_updates base) newUpdates
-                             writeIORef (nh_nr_updates base) (nrUpdates + 1)
-
-          return res
+    do oldUpdates <- readIORef $ nh_updates base
+       nrUpdates <- readIORef $ nh_nr_updates base
+       let (res, c, upd) =
+               foldr (\(op,c) acc ->
+                          case op of
+                            OpDelete k -> if k == key
+                                          then (Just Nothing, c, op)
+                                          else acc
+                            OpInsert k v -> if k == key
+                                            then (Just $ Just v, c, op)
+                                            else acc)
+                         (Nothing, nrUpdates, OpDelete key) $
+                         zip oldUpdates [1..]
+           newUpdates = upd:oldUpdates
+       res' <- case res of
+                 Just x -> return x
+                 Nothing -> do h <- readIORef $ nh_table base
+                               HT.lookup h key
+       if c > 50
+        then flushUpdateQueue base
+        else if c > 20
+             then {- If we had to search a long way then prepend
+                     something to the list so that we don't have to do
+                     it again. -}
+                 do writeIORef (nh_updates base) newUpdates
+                    writeIORef (nh_nr_updates base) (nrUpdates + 1)
+             else return ()
+       return res'

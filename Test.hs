@@ -7,7 +7,7 @@ import Control.Monad
 import NIOHash
 
 myhash :: NIOHash Int String
-myhash = emptyHash id (==)
+myhash = emptyHash fromIntegral
 
 data Operation a b = OperationDelete a
                    | OperationInsert a b deriving Show
@@ -21,11 +21,11 @@ instance (Arbitrary a, Arbitrary b) => Arbitrary (Operation a b) where
 instance Arbitrary Char where
     arbitrary = choose ('a', 'z')
 
-applyOp :: Forcable a => Operation a b -> NIOHash a b -> NIOHash a b
+applyOp :: (Eq a, Forcable a) => Operation a b -> NIOHash a b -> NIOHash a b
 applyOp (OperationDelete a) base = deleteHash base a
 applyOp (OperationInsert a b) base = insertHash base a b
 
-applyOpSeq :: Forcable a => [Operation a b] -> NIOHash a b -> NIOHash a b
+applyOpSeq :: (Eq a, Forcable a) => [Operation a b] -> NIOHash a b -> NIOHash a b
 applyOpSeq ops base = foldr applyOp base ops
 
 doesntMentionKey :: Eq a => [Operation a b] -> a -> Bool
