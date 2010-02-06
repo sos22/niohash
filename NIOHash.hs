@@ -2,13 +2,16 @@
    IO-driven, but provides a nice pure functional interface. -}
 
 module NIOHash(NIOHash, emptyHash, insertHash, lookupHash,
-               deleteHash) where
+               deleteHash, Forcable) where
 
 import System.IO.Unsafe
 import Data.IORef
 
 class Forcable a where
     force :: a -> b -> b
+
+instance Forcable Int where
+    force = seq
 
 data Operation key value = OpDelete key
                          | OpInsert key value
@@ -24,6 +27,23 @@ data Forcable key => NIOHash key value =
               nh_eq :: key -> key -> Bool
             }
 
+{- Equations governing the hash table:
+
+   lookupHash (emptyHash _ _) _ = Nothing
+
+   lookupHash (insertHash (Z $ emptyHash h eq) k1 v) k2 = Just v
+   lookupHash (deleteHash (Z $ emptyHash h eq) k1) k2 = Nothing
+   when h k1 == h k2 and k1 `eq` k2 == True
+   
+   lookupHash (W X) k = lookupHash X k
+
+   where:
+
+   -- Z is some sequence of insert and delete operations
+   -- X is Z $ emptyHash h eq
+   -- W is some sequence of insert and delete operations on keys k2
+      such that k `eq` k2 == False.
+-}
 emptyHash :: Forcable a => (a -> Int) -> (a -> a -> Bool) ->  NIOHash a b
 emptyHash hash eq =
     NIOHash { nh_updates = [],
