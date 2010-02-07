@@ -5,6 +5,7 @@ import Test.QuickCheck
 import Control.Monad
 
 import NIOHash
+import SemiMemoise
 
 myhash :: NIOHash Int String
 myhash = emptyHash fromIntegral
@@ -36,6 +37,9 @@ doesntMentionKey ((OperationInsert k1 _):r) k2
                  | k1 == k2 = False
                  | otherwise = doesntMentionKey r k2
 
+instance Show (a -> b) where
+    show _ = "fn"
+
 main :: IO ()
 main = do quickCheck (\s -> lookupHash myhash s == Nothing)
           quickCheck (\z k v ->
@@ -47,4 +51,4 @@ main = do quickCheck (\s -> lookupHash myhash s == Nothing)
                       lookupHash (applyOpSeq w $ applyOpSeq z myhash) k ==
                       lookupHash (applyOpSeq z myhash) k)
 
-
+          quickCheck $ \(f::Int->Int) x -> semimemoise 10 f x == f x
