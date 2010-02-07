@@ -10,11 +10,7 @@ import Data.IORef
 import Control.Monad
 import Data.Int
 
-class Forcable a where
-    force :: a -> b -> b
-
-instance Forcable Int where
-    force = seq
+import Forcable
 
 data Operation key value = OpDelete key
                          | OpInsert key value
